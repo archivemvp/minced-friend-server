@@ -1,0 +1,12 @@
+{
+  "name": "minced-friend-server",
+  "version": "1.0.0",
+  "description": "WebSocket server for Minced friend system",
+  "main": "friend-server.js",
+  "scripts": {
+    "start": "node friend-server.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  }
+}
