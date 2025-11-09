@@ -37,8 +37,6 @@ wss.on('connection', (ws) => {
         else if (parts[0] === 'FRIEND_REQUEST') {
             const sender = parts[1];
             const target = parts[2];
-            console.log(`📩 Friend request: ${sender} -> ${target}`);
-            
             const targetWs = clients.get(target);
             if (targetWs) {
                 targetWs.send(`FRIEND_REQUEST|${sender}`);
@@ -50,16 +48,12 @@ wss.on('connection', (ws) => {
             const target = parts[2];
             const uuid = parts[3] || '00000000-0000-0000-0000-000000000000';
             
-            console.log(`✅ Friend accepted: ${sender} <-> ${target}`);
-            
-            // Добавляем в друзья
             if (!friends.has(sender)) friends.set(sender, []);
             if (!friends.has(target)) friends.set(target, []);
             
             friends.get(sender).push(target);
             friends.get(target).push(sender);
             
-            // Уведомляем обоих
             const targetWs = clients.get(target);
             const senderWs = clients.get(sender);
             
@@ -71,8 +65,6 @@ wss.on('connection', (ws) => {
             const sender = parts[1];
             const target = parts[2];
             const content = parts[3] || '';
-            
-            console.log(`💬 Message: ${sender} -> ${target}`);
             
             const targetWs = clients.get(target);
             if (targetWs) {
@@ -97,14 +89,12 @@ wss.on('connection', (ws) => {
         // ===== PARTY СИСТЕМА =====
         else if (parts[0] === 'PARTY_CREATE') {
             const leader = parts[1];
-            console.log(`🎉 Party created by: ${leader}`);
             parties.set(leader, [leader]);
         }
         
         else if (parts[0] === 'PARTY_INVITE') {
             const leader = parts[1];
             const target = parts[2];
-            console.log(`📨 Party invite: ${leader} -> ${target}`);
             
             const targetWs = clients.get(target);
             if (targetWs) {
@@ -115,19 +105,16 @@ wss.on('connection', (ws) => {
         else if (parts[0] === 'PARTY_ACCEPT') {
             const member = parts[1];
             const leader = parts[2];
-            console.log(`✅ Party accepted: ${member} joined ${leader}'s party`);
             
             const party = parties.get(leader);
             if (party) {
                 party.push(member);
                 
-                // Уведомляем лидера
                 const leaderWs = clients.get(leader);
                 if (leaderWs) {
                     leaderWs.send(`PARTY_ACCEPT|${member}`);
                 }
                 
-                // Уведомляем всех членов
                 party.forEach(partyMember => {
                     if (partyMember !== member) {
                         const memberWs = clients.get(partyMember);
@@ -142,7 +129,6 @@ wss.on('connection', (ws) => {
         else if (parts[0] === 'PARTY_DECLINE') {
             const member = parts[1];
             const leader = parts[2];
-            console.log(`❌ Party declined: ${member} declined ${leader}'s invite`);
             
             const leaderWs = clients.get(leader);
             if (leaderWs) {
@@ -152,15 +138,12 @@ wss.on('connection', (ws) => {
         
         else if (parts[0] === 'PARTY_LEAVE') {
             const member = parts[1];
-            console.log(`👋 Party leave: ${member}`);
             
-            // Найти party
             for (const [leader, members] of parties.entries()) {
                 const index = members.indexOf(member);
                 if (index !== -1) {
                     members.splice(index, 1);
                     
-                    // Если лидер вышел - удалить party
                     if (member === leader) {
                         members.forEach(partyMember => {
                             const memberWs = clients.get(partyMember);
@@ -170,7 +153,6 @@ wss.on('connection', (ws) => {
                         });
                         parties.delete(leader);
                     } else {
-                        // Уведомляем всех о выходе
                         members.forEach(partyMember => {
                             const memberWs = clients.get(partyMember);
                             if (memberWs) {
@@ -183,15 +165,61 @@ wss.on('connection', (ws) => {
             }
         }
         
+        else if (parts[0] === 'PARTY_TRANSFER_LEADER') {
+            const oldLeader = parts[1];
+            const newLeader = parts[2];
+            
+            const party = parties.get(oldLeader);
+            if (party && party.includes(newLeader)) {
+                // Transfer party ownership
+                parties.set(newLeader, party);
+                parties.delete(oldLeader);
+                
+                // Notify all members
+                party.forEach(member => {
+                    const memberWs = clients.get(member);
+                    if (memberWs) {
+                        memberWs.send(`PARTY_TRANSFER_LEADER|${newLeader}`);
+                    }
+                });
+            }
+        }
+        
+        else if (parts[0] === 'PARTY_KICK') {
+            const leader = parts[1];
+            const kickedMember = parts[2];
+            
+            const party = parties.get(leader);
+            if (party) {
+                const index = party.indexOf(kickedMember);
+                if (index !== -1) {
+                    party.splice(index, 1);
+                    
+                    // Notify kicked member
+                    const kickedWs = clients.get(kickedMember);
+                    if (kickedWs) {
+                        kickedWs.send(`PARTY_KICK|${kickedMember}`);
+                    }
+                    
+                    // Notify other members
+                    party.forEach(member => {
+                        if (member !== kickedMember) {
+                            const memberWs = clients.get(member);
+                            if (memberWs) {
+                                memberWs.send(`PARTY_KICK|${kickedMember}`);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        
         else if (parts[0] === 'PARTY_WAYPOINT') {
             const sender = parts[1];
             const x = parts[2] || '0';
             const y = parts[3] || '0';
             const z = parts[4] || '0';
             
-            console.log(`📍 Waypoint from ${sender}: ${x},${y},${z}`);
-            
-            // Найти party и отправить всем
             for (const [leader, members] of parties.entries()) {
                 if (members.includes(sender)) {
                     members.forEach(member => {
@@ -212,9 +240,6 @@ wss.on('connection', (ws) => {
             const targetPlayer = parts[2] || '';
             const duration = parts[3] || '10000';
             
-            console.log(`👤 Player marker from ${sender}: ${targetPlayer}`);
-            
-            // Найти party и отправить всем
             for (const [leader, members] of parties.entries()) {
                 if (members.includes(sender)) {
                     members.forEach(member => {
@@ -232,7 +257,6 @@ wss.on('connection', (ws) => {
         
         // ===== IRC ЧАТ =====
         else {
-            console.log(`💬 IRC: ${message}`);
             clients.forEach((clientWs, clientName) => {
                 if (clientWs !== ws) {
                     clientWs.send(message);
@@ -246,7 +270,6 @@ wss.on('connection', (ws) => {
             clients.delete(username);
             console.log(`👋 ${username} disconnected`);
             
-            // Отправляем оффлайн статус друзьям
             const userFriends = friends.get(username) || [];
             userFriends.forEach(friendName => {
                 const friendWs = clients.get(friendName);
