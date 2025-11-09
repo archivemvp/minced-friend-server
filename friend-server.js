@@ -1,270 +1,259 @@
-// Simple WebSocket server for friend requests
-// Run: node friend-server.js
-// Port: process.env.PORT || 10000 (for hosting)
-
 const WebSocket = require('ws');
-const http = require('http');
-const fs = require('fs');
-const PORT = process.env.PORT || 10000;
+const port = process.env.PORT || 10000;
 
-// Создаем HTTP сервер для Render
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Minced Friend Server is running');
-});
+const wss = new WebSocket.Server({ port });
 
-const wss = new WebSocket.Server({ server, path: '/ws' });
+// Хранилище
+const clients = new Map(); // username -> ws
+const friends = new Map(); // username -> [friend1, friend2, ...]
+const parties = new Map(); // leader -> [member1, member2, ...]
 
-server.listen(PORT, () => {
-    console.log(`[Friend Server] HTTP server listening on port ${PORT}`);
-});
-
-const clients = new Map(); // username -> WebSocket
-const friendRequests = new Map(); // targetUsername -> [senderUsername, ...]
-const friends = new Map(); // username -> [friendUsername, ...]
-
-const DATA_FILE = 'friend-data.json';
-
-// Загрузка данных из файла
-function loadData() {
-    try {
-        if (fs.existsSync(DATA_FILE)) {
-            const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-            
-            // Загружаем заявки
-            if (data.friendRequests) {
-                Object.entries(data.friendRequests).forEach(([target, senders]) => {
-                    friendRequests.set(target, senders);
-                });
-            }
-            
-            // Загружаем друзей
-            if (data.friends) {
-                Object.entries(data.friends).forEach(([username, friendList]) => {
-                    friends.set(username, friendList);
-                });
-            }
-            
-            console.log('[Friend Server] Loaded data from file');
-            console.log(`[Friend Server] Pending requests: ${friendRequests.size} users`);
-        }
-    } catch (error) {
-        console.error('[Friend Server] Error loading data:', error.message);
-    }
-}
-
-// Сохранение данных в файл
-function saveData() {
-    try {
-        const data = {
-            friendRequests: Object.fromEntries(friendRequests),
-            friends: Object.fromEntries(friends)
-        };
-        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-    } catch (error) {
-        console.error('[Friend Server] Error saving data:', error.message);
-    }
-}
-
-// Загружаем данные при старте
-loadData();
-
-console.log('[Friend Server] Started on port 10000');
+console.log(`🚀 WebSocket server running on port ${port}`);
 
 wss.on('connection', (ws) => {
     let username = null;
-    let requestsSent = false;
-    
-    console.log('[Friend Server] Client connected');
     
     ws.on('message', (data) => {
         const message = data.toString();
         const parts = message.split('|');
-        const type = parts[0];
         
-        // IDENTIFY packet: IDENTIFY|username
-        if (type === 'IDENTIFY' && parts.length >= 2) {
+        // ===== ИДЕНТИФИКАЦИЯ =====
+        if (parts[0] === 'IDENTIFY') {
             username = parts[1];
             clients.set(username, ws);
-            console.log(`[Friend Server] ${username} identified`);
+            console.log(`✅ ${username} connected`);
             
-            // Отправляем все ожидающие заявки сразу после идентификации
-            if (!requestsSent) {
-                requestsSent = true;
-                sendPendingRequests(username, ws);
-            }
-            return;
-        }
-        
-        // IRC messages (username|message)
-        if (!type.startsWith('FRIEND_') && !type.startsWith('IDENTIFY') && parts.length >= 2) {
-            if (!username) {
-                username = parts[0];
-                clients.set(username, ws);
-                
-                // Отправляем все ожидающие заявки при первом подключении
-                if (!requestsSent) {
-                    requestsSent = true;
-                    sendPendingRequests(username, ws);
+            // Отправляем онлайн статус друзьям
+            const userFriends = friends.get(username) || [];
+            userFriends.forEach(friendName => {
+                const friendWs = clients.get(friendName);
+                if (friendWs) {
+                    friendWs.send(`FRIEND_STATUS|${username}|online|`);
                 }
-            }
-            
-            // Broadcast IRC message
-            const ircMsg = parts.slice(1).join('|');
-            broadcast(message);
-            return;
+            });
         }
         
-        // Friend request: FRIEND_REQUEST|sender|target
-        if (type === 'FRIEND_REQUEST' && parts.length >= 3) {
+        // ===== ДРУЗЬЯ =====
+        else if (parts[0] === 'FRIEND_REQUEST') {
             const sender = parts[1];
             const target = parts[2];
+            console.log(`📩 Friend request: ${sender} -> ${target}`);
             
-            console.log(`[Friend Server] ${sender} -> ${target} (friend request)`);
-            
-            // Store request
-            if (!friendRequests.has(target)) {
-                friendRequests.set(target, []);
-            }
-            if (!friendRequests.get(target).includes(sender)) {
-                friendRequests.get(target).push(sender);
-                saveData(); // Сохраняем после добавления заявки
-            }
-            
-            // Send to target if online
             const targetWs = clients.get(target);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+            if (targetWs) {
                 targetWs.send(`FRIEND_REQUEST|${sender}`);
-                console.log(`[Friend Server] Sent request notification to ${target}`);
-            } else {
-                console.log(`[Friend Server] ${target} is offline, request saved`);
             }
         }
         
-        // Friend accept: FRIEND_ACCEPT|accepter|sender|uuid
-        else if (type === 'FRIEND_ACCEPT' && parts.length >= 4) {
-            const accepter = parts[1];
-            const sender = parts[2];
-            const uuid = parts[3];
+        else if (parts[0] === 'FRIEND_ACCEPT') {
+            const sender = parts[1];
+            const target = parts[2];
+            const uuid = parts[3] || '00000000-0000-0000-0000-000000000000';
             
-            console.log(`[Friend Server] ${accepter} accepted ${sender}`);
+            console.log(`✅ Friend accepted: ${sender} <-> ${target}`);
             
-            // Remove from requests
-            if (friendRequests.has(accepter)) {
-                const requests = friendRequests.get(accepter);
-                const index = requests.indexOf(sender);
-                if (index > -1) {
-                    requests.splice(index, 1);
-                }
-            }
+            // Добавляем в друзья
+            if (!friends.has(sender)) friends.set(sender, []);
+            if (!friends.has(target)) friends.set(target, []);
             
-            // Add to friends
-            if (!friends.has(accepter)) {
-                friends.set(accepter, []);
-            }
-            if (!friends.has(sender)) {
-                friends.set(sender, []);
-            }
-            friends.get(accepter).push(sender);
-            friends.get(sender).push(accepter);
+            friends.get(sender).push(target);
+            friends.get(target).push(sender);
             
-            // Сохраняем изменения
-            saveData();
-            
-            // Notify both users
+            // Уведомляем обоих
+            const targetWs = clients.get(target);
             const senderWs = clients.get(sender);
-            if (senderWs && senderWs.readyState === WebSocket.OPEN) {
-                senderWs.send(`FRIEND_ACCEPT|${accepter}|${uuid}|online|`);
-            }
             
-            // Send back to accepter
-            ws.send(`FRIEND_ACCEPT|${sender}|${uuid}|online|`);
+            if (targetWs) targetWs.send(`FRIEND_ACCEPT|${sender}|${uuid}|online|`);
+            if (senderWs) senderWs.send(`FRIEND_ACCEPT|${target}|${uuid}|online|`);
         }
         
-        // Friend decline: FRIEND_DECLINE|decliner|sender
-        else if (type === 'FRIEND_DECLINE' && parts.length >= 3) {
-            const decliner = parts[1];
-            const sender = parts[2];
+        else if (parts[0] === 'FRIEND_MESSAGE') {
+            const sender = parts[1];
+            const target = parts[2];
+            const content = parts[3] || '';
             
-            console.log(`[Friend Server] ${decliner} declined ${sender}`);
+            console.log(`💬 Message: ${sender} -> ${target}`);
             
-            // Remove from requests
-            if (friendRequests.has(decliner)) {
-                const requests = friendRequests.get(decliner);
-                const index = requests.indexOf(sender);
-                if (index > -1) {
-                    requests.splice(index, 1);
+            const targetWs = clients.get(target);
+            if (targetWs) {
+                targetWs.send(`FRIEND_MESSAGE|${sender}|${content}`);
+            }
+        }
+        
+        else if (parts[0] === 'FRIEND_COORDS') {
+            const sender = parts[1];
+            const target = parts[2];
+            const x = parts[3] || '0';
+            const y = parts[4] || '0';
+            const z = parts[5] || '0';
+            
+            const targetWs = clients.get(target);
+            if (targetWs) {
+                const coordMsg = `Координаты от ${sender}: X=${x}, Y=${y}, Z=${z}`;
+                targetWs.send(`FRIEND_MESSAGE|${sender}|${coordMsg}`);
+            }
+        }
+        
+        // ===== PARTY СИСТЕМА =====
+        else if (parts[0] === 'PARTY_CREATE') {
+            const leader = parts[1];
+            console.log(`🎉 Party created by: ${leader}`);
+            parties.set(leader, [leader]);
+        }
+        
+        else if (parts[0] === 'PARTY_INVITE') {
+            const leader = parts[1];
+            const target = parts[2];
+            console.log(`📨 Party invite: ${leader} -> ${target}`);
+            
+            const targetWs = clients.get(target);
+            if (targetWs) {
+                targetWs.send(`PARTY_INVITE|${leader}`);
+            }
+        }
+        
+        else if (parts[0] === 'PARTY_ACCEPT') {
+            const member = parts[1];
+            const leader = parts[2];
+            console.log(`✅ Party accepted: ${member} joined ${leader}'s party`);
+            
+            const party = parties.get(leader);
+            if (party) {
+                party.push(member);
+                
+                // Уведомляем лидера
+                const leaderWs = clients.get(leader);
+                if (leaderWs) {
+                    leaderWs.send(`PARTY_ACCEPT|${member}`);
+                }
+                
+                // Уведомляем всех членов
+                party.forEach(partyMember => {
+                    if (partyMember !== member) {
+                        const memberWs = clients.get(partyMember);
+                        if (memberWs) {
+                            memberWs.send(`PARTY_MEMBER_JOIN|${member}`);
+                        }
+                    }
+                });
+            }
+        }
+        
+        else if (parts[0] === 'PARTY_DECLINE') {
+            const member = parts[1];
+            const leader = parts[2];
+            console.log(`❌ Party declined: ${member} declined ${leader}'s invite`);
+            
+            const leaderWs = clients.get(leader);
+            if (leaderWs) {
+                leaderWs.send(`PARTY_DECLINE|${member}`);
+            }
+        }
+        
+        else if (parts[0] === 'PARTY_LEAVE') {
+            const member = parts[1];
+            console.log(`👋 Party leave: ${member}`);
+            
+            // Найти party
+            for (const [leader, members] of parties.entries()) {
+                const index = members.indexOf(member);
+                if (index !== -1) {
+                    members.splice(index, 1);
+                    
+                    // Если лидер вышел - удалить party
+                    if (member === leader) {
+                        members.forEach(partyMember => {
+                            const memberWs = clients.get(partyMember);
+                            if (memberWs) {
+                                memberWs.send(`PARTY_DISBAND|${leader}`);
+                            }
+                        });
+                        parties.delete(leader);
+                    } else {
+                        // Уведомляем всех о выходе
+                        members.forEach(partyMember => {
+                            const memberWs = clients.get(partyMember);
+                            if (memberWs) {
+                                memberWs.send(`PARTY_LEAVE|${member}`);
+                            }
+                        });
+                    }
+                    break;
                 }
             }
-            
-            // Сохраняем изменения
-            saveData();
         }
         
-        // Friend message: FRIEND_MESSAGE|sender|target|message
-        else if (type === 'FRIEND_MESSAGE' && parts.length >= 4) {
+        else if (parts[0] === 'PARTY_WAYPOINT') {
             const sender = parts[1];
-            const target = parts[2];
-            const msgContent = parts.slice(3).join('|');
+            const x = parts[2] || '0';
+            const y = parts[3] || '0';
+            const z = parts[4] || '0';
             
-            const targetWs = clients.get(target);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(`FRIEND_MESSAGE|${sender}|${msgContent}`);
-                console.log(`[Friend Server] Message ${sender} -> ${target}: ${msgContent}`);
+            console.log(`📍 Waypoint from ${sender}: ${x},${y},${z}`);
+            
+            // Найти party и отправить всем
+            for (const [leader, members] of parties.entries()) {
+                if (members.includes(sender)) {
+                    members.forEach(member => {
+                        if (member !== sender) {
+                            const memberWs = clients.get(member);
+                            if (memberWs) {
+                                memberWs.send(`PARTY_WAYPOINT|${x}|${y}|${z}`);
+                            }
+                        }
+                    });
+                    break;
+                }
             }
         }
         
-        // Coordinates: FRIEND_COORDS|sender|target|x|y|z
-        else if (type === 'FRIEND_COORDS' && parts.length >= 6) {
+        else if (parts[0] === 'PARTY_PLAYER_MARKER') {
             const sender = parts[1];
-            const target = parts[2];
-            const x = parts[3];
-            const y = parts[4];
-            const z = parts[5];
+            const targetPlayer = parts[2] || '';
+            const duration = parts[3] || '10000';
             
-            const targetWs = clients.get(target);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                // Send as regular message with coordinates
-                targetWs.send(`FRIEND_MESSAGE|${sender}|Coordinates: ${x}, ${y}, ${z}`);
-                console.log(`[Friend Server] Coords ${sender} -> ${target}: ${x}, ${y}, ${z}`);
+            console.log(`👤 Player marker from ${sender}: ${targetPlayer}`);
+            
+            // Найти party и отправить всем
+            for (const [leader, members] of parties.entries()) {
+                if (members.includes(sender)) {
+                    members.forEach(member => {
+                        if (member !== sender) {
+                            const memberWs = clients.get(member);
+                            if (memberWs) {
+                                memberWs.send(`PARTY_PLAYER_MARKER|${targetPlayer}|${duration}`);
+                            }
+                        }
+                    });
+                    break;
+                }
             }
+        }
+        
+        // ===== IRC ЧАТ =====
+        else {
+            console.log(`💬 IRC: ${message}`);
+            clients.forEach((clientWs, clientName) => {
+                if (clientWs !== ws) {
+                    clientWs.send(message);
+                }
+            });
         }
     });
     
     ws.on('close', () => {
         if (username) {
-            console.log(`[Friend Server] ${username} disconnected`);
             clients.delete(username);
+            console.log(`👋 ${username} disconnected`);
+            
+            // Отправляем оффлайн статус друзьям
+            const userFriends = friends.get(username) || [];
+            userFriends.forEach(friendName => {
+                const friendWs = clients.get(friendName);
+                if (friendWs) {
+                    friendWs.send(`FRIEND_STATUS|${username}|offline|`);
+                }
+            });
         }
-    });
-    
-    ws.on('error', (error) => {
-        console.error('[Friend Server] Error:', error.message);
     });
 });
-
-function sendPendingRequests(username, ws) {
-    // Отправляем все ожидающие заявки этому игроку
-    console.log(`[Friend Server] Checking pending requests for ${username}...`);
-    console.log(`[Friend Server] Total pending users: ${friendRequests.size}`);
-    
-    if (friendRequests.has(username)) {
-        const requests = friendRequests.get(username);
-        console.log(`[Friend Server] Sending ${requests.length} pending requests to ${username}`);
-        requests.forEach(sender => {
-            const packet = `FRIEND_REQUEST|${sender}`;
-            console.log(`[Friend Server] -> ${packet}`);
-            ws.send(packet);
-        });
-    } else {
-        console.log(`[Friend Server] No pending requests for ${username}`);
-    }
-}
-
-function broadcast(message) {
-    wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
-    });
-}
